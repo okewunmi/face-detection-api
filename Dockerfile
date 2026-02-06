@@ -1,8 +1,9 @@
 FROM python:3.11-slim
 
-# Install build tools and system dependencies
+# Install build tools and cmake
 RUN apt-get update && apt-get install -y \
     build-essential \
+    cmake \
     g++ \
     libglib2.0-0 \
     libsm6 \

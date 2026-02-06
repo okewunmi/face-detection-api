@@ -10,7 +10,6 @@ import time
 app = Flask(__name__)
 CORS(app)
 
-# Initialize face analyzer
 face_app = None
 
 def get_face_app():
@@ -24,7 +23,7 @@ def get_face_app():
 def home():
     return jsonify({
         'success': True,
-        'message': 'Face Detection API (InsightFace)',
+        'message': 'Face Detection API is running',
         'endpoints': {
             'extract': '/api/face/extract (POST)',
             'verify': '/api/face/verify (POST)'
@@ -42,24 +41,19 @@ def extract_face():
         print('📸 Extracting face...')
         start = time.time()
         
-        # Decode base64 to numpy array
         img_data = base64.b64decode(data['image'].split(',')[1])
         nparr = np.frombuffer(img_data, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
         
-        # Get face analyzer
         analyzer = get_face_app()
-        
-        # Detect faces
         faces = analyzer.get(img)
         
         if len(faces) == 0:
             return jsonify({'success': False, 'message': 'No face detected'}), 400
         
-        # Get embedding from first face
         descriptor = faces[0].embedding.tolist()
-        
         processing_time = int((time.time() - start) * 1000)
+        
         print(f'✅ Extracted in {processing_time}ms')
         
         return jsonify({
@@ -82,16 +76,11 @@ def verify_face():
         students = data['students']
         
         if not students:
-            return jsonify({
-                'success': True,
-                'matched': False,
-                'message': 'No students'
-            })
+            return jsonify({'success': True, 'matched': False, 'message': 'No students'})
         
         print(f'🔍 Verifying against {len(students)} students...')
         start = time.time()
         
-        # Compute cosine similarity
         def compute_sim(emb1, emb2):
             return np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
         
@@ -107,8 +96,6 @@ def verify_face():
                 best_match = student
         
         processing_time = int((time.time() - start) * 1000)
-        
-        # Threshold for InsightFace is typically 0.3-0.4
         threshold = 0.35
         matched = best_similarity > threshold
         
