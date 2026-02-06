@@ -1,71 +1,33 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import insightface
-from insightface.app import FaceAnalysis
 import numpy as np
 import base64
 import cv2
 import time
+import subprocess
+import sys
 
 app = Flask(__name__)
 CORS(app)
 
-face_app = None
-
-def get_face_app():
-    global face_app
-    if face_app is None:
-        face_app = FaceAnalysis(providers=['CPUExecutionProvider'])
-        face_app.prepare(ctx_id=0, det_size=(640, 640))
-    return face_app
+# Install face_recognition library (uses dlib, 128-dimensional)
+try:
+    import face_recognition
+except ImportError:
+    print("Installing face_recognition...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "face_recognition"])
+    import face_recognition
 
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
         'success': True,
-        'message': 'Face Detection API is running',
+        'message': 'Face Detection API is running (face_recognition - 128D)',
         'endpoints': {
             'extract': '/api/face/extract (POST)',
             'verify': '/api/face/verify (POST)'
         }
     })
-
-# @app.route('/api/face/extract', methods=['POST'])
-# def extract_face():
-#     try:
-#         data = request.get_json()
-        
-#         if not data or 'image' not in data:
-#             return jsonify({'success': False, 'message': 'Image required'}), 400
-        
-#         print('📸 Extracting face...')
-#         start = time.time()
-        
-#         img_data = base64.b64decode(data['image'].split(',')[1])
-#         nparr = np.frombuffer(img_data, np.uint8)
-#         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        
-#         analyzer = get_face_app()
-#         faces = analyzer.get(img)
-        
-#         if len(faces) == 0:
-#             return jsonify({'success': False, 'message': 'No face detected'}), 400
-        
-#         descriptor = faces[0].embedding.tolist()
-#         processing_time = int((time.time() - start) * 1000)
-        
-#         print(f'✅ Extracted in {processing_time}ms')
-        
-#         return jsonify({
-#             'success': True,
-#             'descriptor': descriptor,
-#             'confidence': 95,
-#             'processingTime': processing_time
-#         })
-        
-#     except Exception as e:
-#         print(f'❌ Error: {str(e)}')
-#         return jsonify({'success': False, 'message': str(e)}), 500
 
 @app.route('/api/face/extract', methods=['POST'])
 def extract_face():
@@ -75,7 +37,7 @@ def extract_face():
         if not data or 'image' not in data:
             return jsonify({'success': False, 'message': 'Image required'}), 400
         
-        print('📸 Extracting face...')
+        print('📸 Extracting face with face_recognition...')
         start = time.time()
         
         # Decode image
@@ -86,53 +48,54 @@ def extract_face():
         if img is None:
             return jsonify({'success': False, 'message': 'Failed to decode image'}), 400
         
-        # Log image details
+        # Convert BGR to RGB (face_recognition uses RGB)
+        rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
         height, width = img.shape[:2]
         print(f'📐 Image size: {width}x{height}')
         
-        # Try different detection sizes
-        analyzer = get_face_app()
+        # Detect faces and get 128-dimensional encodings
+        face_locations = face_recognition.face_locations(rgb_img, model='hog')
         
-        # Try with multiple detection sizes for better results
-        detection_sizes = [(640, 640), (320, 320), (160, 160)]
-        faces = []
+        if len(face_locations) == 0:
+            # Try with CNN model (more accurate but slower)
+            print('🔍 Trying CNN model...')
+            face_locations = face_recognition.face_locations(rgb_img, model='cnn')
         
-        for det_size in detection_sizes:
-            print(f'🔍 Trying detection size: {det_size}')
-            analyzer.prepare(ctx_id=0, det_size=det_size)
-            faces = analyzer.get(img)
-            
-            if len(faces) > 0:
-                print(f'✅ Found {len(faces)} face(s) with size {det_size}')
-                break
-        
-        if len(faces) == 0:
-            # Save failed image for debugging
-            debug_path = f'/tmp/failed_{int(time.time())}.jpg'
-            cv2.imwrite(debug_path, img)
-            print(f'❌ No face detected. Image saved to {debug_path}')
+        if len(face_locations) == 0:
+            print(f'❌ No face detected')
+            brightness = int(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).mean())
             
             return jsonify({
                 'success': False, 
                 'message': 'No face detected. Please ensure face is clearly visible and well-lit.',
                 'debug': {
                     'imageSize': f'{width}x{height}',
-                    'brightness': int(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).mean())
+                    'brightness': brightness
                 }
             }), 400
         
-        # Use the best (first) face
-        face = faces[0]
-        descriptor = face.embedding.tolist()
+        # Get face encodings (128-dimensional descriptors)
+        face_encodings = face_recognition.face_encodings(rgb_img, face_locations)
+        
+        if len(face_encodings) == 0:
+            return jsonify({
+                'success': False,
+                'message': 'Face detected but could not extract features'
+            }), 400
+        
+        # Use the first face
+        descriptor = face_encodings[0].tolist()
         processing_time = int((time.time() - start) * 1000)
         
-        # Calculate face quality score
-        bbox = face.bbox.astype(int)
-        face_width = bbox[2] - bbox[0]
-        face_height = bbox[3] - bbox[1]
+        # Calculate face area
+        top, right, bottom, left = face_locations[0]
+        face_width = right - left
+        face_height = bottom - top
         face_area_ratio = (face_width * face_height) / (width * height)
         
         print(f'✅ Face extracted in {processing_time}ms')
+        print(f'📊 Descriptor dimension: {len(descriptor)}')
         print(f'📊 Face area: {face_area_ratio*100:.1f}% of image')
         
         return jsonify({
@@ -141,9 +104,10 @@ def extract_face():
             'confidence': 95,
             'processingTime': processing_time,
             'debug': {
-                'faceCount': len(faces),
+                'faceCount': len(face_locations),
                 'faceArea': f'{face_area_ratio*100:.1f}%',
-                'imageSize': f'{width}x{height}'
+                'imageSize': f'{width}x{height}',
+                'descriptorDim': len(descriptor)
             }
         })
         
@@ -165,51 +129,71 @@ def verify_face():
             return jsonify({'success': True, 'matched': False, 'message': 'No students'})
         
         print(f'🔍 Verifying against {len(students)} students...')
+        print(f'📊 Input descriptor dimension: {len(input_desc)}')
         start = time.time()
         
-        def compute_sim(emb1, emb2):
-            return np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
+        # Verify descriptor dimensions
+        if len(input_desc) != 128:
+            return jsonify({
+                'success': False,
+                'message': f'Invalid descriptor dimension: {len(input_desc)} (expected 128)'
+            }), 400
         
         best_match = None
-        best_similarity = -1
+        best_distance = float('inf')
         
         for student in students:
             student_desc = np.array(student['descriptor'])
-            similarity = compute_sim(input_desc, student_desc)
             
-            if similarity > best_similarity:
-                best_similarity = similarity
+            # Verify student descriptor dimension
+            if len(student_desc) != 128:
+                print(f'⚠️ Skipping {student.get("matricNumber", "unknown")}: wrong dimension {len(student_desc)}')
+                continue
+            
+            # Calculate Euclidean distance (face_recognition uses this)
+            distance = np.linalg.norm(input_desc - student_desc)
+            
+            if distance < best_distance:
+                best_distance = distance
                 best_match = student
         
         processing_time = int((time.time() - start) * 1000)
-        threshold = 0.35
-        matched = best_similarity > threshold
+        
+        # face_recognition typically uses threshold of 0.6
+        threshold = 0.6
+        matched = best_distance < threshold
         
         if not matched:
+            print(f'❌ No match found (best distance: {best_distance:.3f})')
             return jsonify({
                 'success': True,
                 'matched': False,
                 'message': 'No match found',
-                'bestDistance': float(1 - best_similarity),
+                'bestDistance': float(best_distance),
                 'processingTime': processing_time
             })
         
-        confidence = int(best_similarity * 100)
+        # Convert distance to confidence percentage (inverse relationship)
+        # Distance ranges from 0 (perfect match) to ~1.0
+        confidence = int(max(0, min(100, (1 - best_distance) * 100)))
         
-        print(f'✅ Match: {best_match["matricNumber"]} ({confidence}%)')
+        print(f'✅ Match: {best_match["matricNumber"]} (confidence: {confidence}%, distance: {best_distance:.3f})')
         
         return jsonify({
             'success': True,
             'matched': True,
             'student': best_match,
             'confidence': confidence,
-            'distance': float(1 - best_similarity),
+            'distance': float(best_distance),
             'processingTime': processing_time
         })
         
     except Exception as e:
         print(f'❌ Error: {str(e)}')
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'message': str(e)}), 500
 
 if __name__ == '__main__':
+    print('🚀 Starting Face Recognition API (128-dimensional)')
     app.run(host='0.0.0.0', port=5000, debug=True)
