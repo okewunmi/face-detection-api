@@ -1,31 +1,20 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import insightface
-from insightface.app import FaceAnalysis
+import face_recognition
 import numpy as np
 import base64
-import cv2
-import os
+import io
+from PIL import Image
 import time
 
 app = Flask(__name__)
 CORS(app)
 
-# Initialize face analyzer
-face_app = None
-
-def get_face_app():
-    global face_app
-    if face_app is None:
-        face_app = FaceAnalysis(providers=['CPUExecutionProvider'])
-        face_app.prepare(ctx_id=0, det_size=(640, 640))
-    return face_app
-
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
         'success': True,
-        'message': 'Face Detection API (InsightFace)',
+        'message': 'Face Detection API is running',
         'endpoints': {
             'extract': '/api/face/extract (POST)',
             'verify': '/api/face/verify (POST)'
@@ -43,22 +32,31 @@ def extract_face():
         print('📸 Extracting face...')
         start = time.time()
         
-        # Decode base64 to numpy array
-        img_data = base64.b64decode(data['image'].split(',')[1])
-        nparr = np.frombuffer(img_data, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        # Decode base64
+        base64_data = data['image'].split(',')[1]
+        image_bytes = base64.b64decode(base64_data)
         
-        # Get face analyzer
-        analyzer = get_face_app()
+        # Load image
+        image = Image.open(io.BytesIO(image_bytes))
+        image_array = np.array(image)
         
-        # Detect faces
-        faces = analyzer.get(img)
+        # Convert RGBA to RGB
+        if image_array.shape[-1] == 4:
+            image_array = image_array[:, :, :3]
         
-        if len(faces) == 0:
+        # Find faces
+        face_locations = face_recognition.face_locations(image_array)
+        
+        if len(face_locations) == 0:
             return jsonify({'success': False, 'message': 'No face detected'}), 400
         
-        # Get embedding from first face
-        descriptor = faces[0].embedding.tolist()
+        # Extract encodings
+        face_encodings = face_recognition.face_encodings(image_array, face_locations)
+        
+        if len(face_encodings) == 0:
+            return jsonify({'success': False, 'message': 'Could not extract face'}), 400
+        
+        descriptor = face_encodings[0].tolist()
         
         processing_time = int((time.time() - start) * 1000)
         print(f'✅ Extracted in {processing_time}ms')
@@ -79,10 +77,10 @@ def verify_face():
     try:
         data = request.get_json()
         
-        input_desc = np.array(data['inputDescriptor'])
+        input_descriptor = np.array(data['inputDescriptor'])
         students = data['students']
         
-        if not students:
+        if len(students) == 0:
             return jsonify({
                 'success': True,
                 'matched': False,
@@ -92,46 +90,56 @@ def verify_face():
         print(f'🔍 Verifying against {len(students)} students...')
         start = time.time()
         
-        # Compute cosine similarity
-        def compute_sim(emb1, emb2):
-            return np.dot(emb1, emb2) / (np.linalg.norm(emb1) * np.linalg.norm(emb2))
-        
-        best_match = None
-        best_similarity = -1
+        # Prepare known encodings
+        known_encodings = []
+        student_map = {}
         
         for student in students:
-            student_desc = np.array(student['descriptor'])
-            similarity = compute_sim(input_desc, student_desc)
-            
-            if similarity > best_similarity:
-                best_similarity = similarity
-                best_match = student
+            if 'descriptor' in student and 'matricNumber' in student:
+                encoding = np.array(student['descriptor'])
+                known_encodings.append(encoding)
+                student_map[len(known_encodings) - 1] = student
+        
+        if len(known_encodings) == 0:
+            return jsonify({
+                'success': True,
+                'matched': False,
+                'message': 'No valid student descriptors'
+            })
+        
+        # Calculate distances
+        face_distances = face_recognition.face_distance(known_encodings, input_descriptor)
+        
+        # Find best match
+        best_match_index = np.argmin(face_distances)
+        best_distance = float(face_distances[best_match_index])
+        
+        threshold = 0.6
+        matched = best_distance < threshold
         
         processing_time = int((time.time() - start) * 1000)
         
-        # Threshold for InsightFace is typically 0.3-0.4
-        threshold = 0.35
-        matched = best_similarity > threshold
-        
         if not matched:
+            print(f'❌ No match (distance: {best_distance:.3f})')
             return jsonify({
                 'success': True,
                 'matched': False,
                 'message': 'No match found',
-                'bestDistance': float(1 - best_similarity),
+                'bestDistance': best_distance,
                 'processingTime': processing_time
             })
         
-        confidence = int(best_similarity * 100)
+        matched_student = student_map[best_match_index]
+        confidence = int((1 - best_distance) * 100)
         
-        print(f'✅ Match: {best_match["matricNumber"]} ({confidence}%)')
+        print(f'✅ Match: {matched_student["matricNumber"]} ({confidence}%)')
         
         return jsonify({
             'success': True,
             'matched': True,
-            'student': best_match,
+            'student': matched_student,
             'confidence': confidence,
-            'distance': float(1 - best_similarity),
+            'distance': best_distance,
             'processingTime': processing_time
         })
         
