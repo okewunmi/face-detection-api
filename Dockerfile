@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Install minimal system dependencies
 RUN apt-get update && apt-get install -y \
     libglib2.0-0 \
     libsm6 \
